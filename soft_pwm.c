@@ -33,6 +33,7 @@ static struct hrtimer hr_timer;
 struct pwm_desc {
   unsigned int pulse;    // pulse width, in microseconds
   unsigned int period;   // wave period, in microseconds 
+  unsigned int pulses;   // number of pwm pulses before stopping; -1 never stops, 0 stops immediately
   unsigned long counter; // "interrupt" counter - counts each value toggle
   int value;             // current GPIO pin value (0 or 1 only)
   ktime_t next_tick;     // timer tick at which next toggling should happen
@@ -68,6 +69,8 @@ static ssize_t pwm_show(struct device *dev, struct device_attribute *attr, char 
       status = sprintf(buf, "%d usec\n", desc->pulse);
     }else if(strcmp(attr->attr.name, "period")==0){
       status = sprintf(buf, "%d usec\n", desc->period);
+    }else if(strcmp(attr->attr.name, "pulses")==0){
+      status = sprintf(buf, "%d usec\n", desc->pulses);
     }else if(strcmp(attr->attr.name, "counter")==0){
       status = sprintf(buf, "%lu\n", desc->counter);
     }else{
@@ -95,6 +98,8 @@ static ssize_t pwm_store(
         if(value<=desc->period){ desc->pulse = (unsigned int)value; }
       }else if(strcmp(attr->attr.name, "period")==0){
         desc->period = (unsigned int)value;
+      }else if(strcmp(attr->attr.name, "pulses")==0){
+        desc->pulses = (unsigned int)value;
       }
       desc->next_tick = ktime_get();
       printk(KERN_INFO "Starting timer (%s).\n", attr->attr.name);
@@ -108,10 +113,12 @@ static ssize_t pwm_store(
 /* Sysfs attributes definition for PWMs */
 static DEVICE_ATTR(pulse,   0644, pwm_show, pwm_store);
 static DEVICE_ATTR(period,  0644, pwm_show, pwm_store);
+static DEVICE_ATTR(pulses,  0644, pwm_show, pwm_store);
 static DEVICE_ATTR(counter, 0444, pwm_show, NULL);
 static const struct attribute *soft_pwm_dev_attrs[] = {
   &dev_attr_pulse.attr,
   &dev_attr_period.attr,
+  &dev_attr_pulses.attr,
   &dev_attr_counter.attr,
   NULL,
 };
@@ -191,7 +198,8 @@ int pwm_export(unsigned gpio){
   mutex_lock(&sysfs_lock);
 
   desc = &pwm_table[gpio];
-  desc->value = 0;
+  desc->value  = 0;
+  desc->pulses = -1;
   dev = device_create(&soft_pwm_class, NULL, MKDEV(0, 0), desc, "pwm%d", gpio);
   if(dev){
     status = sysfs_create_group(&dev->kobj, &soft_pwm_dev_attr_group);
@@ -256,13 +264,15 @@ enum hrtimer_restart soft_pwm_hrtimer_callback(struct hrtimer *timer){
     if(
       test_bit(FLAG_SOFTPWM,&desc->flags) &&
       (desc->period>0) &&
-      (desc->pulse<=desc->period)
+      (desc->pulse<=desc->period) &&
+      (desc->pulses!=0)
     ){
       if(desc->next_tick.tv64<=now.tv64){
         desc->value = 1-desc->value;
         __gpio_set_value(gpio,desc->value);
         desc->counter++;
-        if((desc->pulse==0)||(desc->pulse==desc->period)){
+        if(desc->pulses>0){ desc->pulses--; }
+        if((desc->pulse==0)||(desc->pulse==desc->period)||(desc->pulses==0)){
           desc->next_tick.tv64 = KTIME_MAX;
         }else{
           desc->next_tick=ktime_add_ns(
